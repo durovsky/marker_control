@@ -1,0 +1,42 @@
+<?xml version="1.0" ?>
+<launch>
+
+  <!-- By default, we do not start a database (it can be large) -->
+  <arg name="db" value="false" />
+
+  <!-- By default, we are not in debug mode -->
+  <arg name="debug" default="false" />
+  
+  <!-- include moveit planning_execution launch file  -->
+  <include file="$(find motoman_sda10f_moveit_config)/launch/demo.launch" /> 
+      
+  <!--  Run marker_control node with move_group params -->
+  <node name="marker_control" pkg="marker_control" type="marker_control" output="screen" >    
+    <rosparam>
+      planning_time: 20
+      orientation_tolerance: 0.02
+      position_tolerance: 0.02
+      planning_attempts: 1
+    </rosparam>    
+  </node> 
+  
+  <!--   usb_cam node -->
+  <node name="usb_cam" pkg="usb_cam" type="usb_cam_node" output="screen">
+    <param name="video_device" value="/dev/video0" />
+    <param name="image_width" value="1280" />
+    <param name="image_height" value="720" />
+    <param name="pixel_format" value="mjpeg" />
+    <param name="camera_frame_id" value="usb_cam" />
+    <param name="io_method" value="mmap"/>
+  </node>
+    
+  <!--   Aruco marker detection -->
+  <node pkg="viewpoint_estimation" type="viewpoint_estimation" name="viewpoint_estimation" > 
+     <remap from="/image_raw" to="/usb_cam/image_raw" /> 
+     <rosparam> 
+      calibration_file: "/home/durovsky/catkin_ws/src/OpenCV_Library/viewpoint_estimation/data/geniusf100_calibration.txt"    
+      camera_frame: "camera_optical_frame"
+    </rosparam> 
+  </node> 
+ 
+</launch>
