@@ -41,6 +41,14 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <tf/transform_datatypes.h>
 #include <tf/transform_listener.h>
 
+//Headers for direct Robot driver access
+#include <sensor_msgs/JointState.h>
+#include <actionlib/client/simple_action_client.h>
+#include <control_msgs/JointTrajectoryAction.h>
+#include <control_msgs/JointTrajectoryGoal.h>
+#include <control_msgs/FollowJointTrajectoryAction.h>
+#include <trajectory_msgs/JointTrajectoryPoint.h>
+
 //MoveIT Headers
 #include <moveit/move_group_interface/move_group.h>
 #include <moveit/robot_trajectory/robot_trajectory.h>
@@ -54,6 +62,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <moveit_msgs/DisplayRobotState.h>
 
 #include <Eigen/Dense>
+#include <boost/circular_buffer.hpp>
+
+typedef actionlib::SimpleActionClient<control_msgs::FollowJointTrajectoryAction> TrajClient;
 
 class Robot
 {
@@ -61,25 +72,61 @@ public:
     Robot(ros::NodeHandle *nh);
     ~Robot();
     void markerCallback(const geometry_msgs::Pose::ConstPtr &msg);
+    void move_groups_init(ros::NodeHandle nh);
+
+    //Synchronized movement - direct driver access
+    void startTrajectory(control_msgs::FollowJointTrajectoryGoal goal);
+
+    //JointState Callback - required for
+    void r1_Callback(const sensor_msgs::JointState::ConstPtr &msg);
+    void r2_Callback(const sensor_msgs::JointState::ConstPtr &msg);
+    void b1_Callback(const sensor_msgs::JointState::ConstPtr &msg);
+    void b2_Callback(const sensor_msgs::JointState::ConstPtr &msg);
+
+    control_msgs::FollowJointTrajectoryGoal Trajectory_power_up();
+    control_msgs::FollowJointTrajectoryGoal Trajectory_start();
 
 private:
+    //ROS messaging
     ros::Publisher marker_pub;
+    ros::Publisher marker_trajectory_pub;
     ros::Publisher robot_state_pub;
 
+    //TrajClient for direct motoman driver access
+    TrajClient* traj_client_;
+
+    //"Wait for message" flags for joint_states Callbacks
+    bool r1_recieved, r2_recieved, b1_recieved, b2_recieved;
+
+    //Joint State variables - holding current robot state
+    sensor_msgs::JointState r1, r2, b1, b2;
+
+    //Moveit declarations
+    moveit::planning_interface::MoveGroup *group_arm_left;
+    moveit::planning_interface::MoveGroup *group_arm_right;
+    moveit::planning_interface::MoveGroup *group_torso;
+
+    moveit::planning_interface::MoveGroup::Plan arm_left_plan;
+    moveit::planning_interface::MoveGroup::Plan arm_right_plan;
+    moveit::planning_interface::MoveGroup::Plan torso_plan;
+
+    //ROS C++ API for FK and IK computations on current model
     moveit::core::RobotModelPtr kinematic_model;
     moveit::core::JointModelGroup* joint_model_group_arm_left;
     moveit::core::RobotStatePtr kinematic_state;
     Eigen::Affine3d end_effector_state;
 
+    //Marker control realted poses
     geometry_msgs::PoseStamped current_pose;
     geometry_msgs::Pose marker_pose;
     geometry_msgs::Pose goal_pose;
 
-    std::string arm_left_end_effector,
-                arm_right_end_effector;
-
+    //Visualization
     visualization_msgs::Marker marker;
+    visualization_msgs::Marker marker_trajectory_point;
+    boost::circular_buffer<geometry_msgs::Point> *trajectory_circular_buffer;
 
+    //TF variables
     tf::TransformListener *listener;
     tf::StampedTransform marker_transform;
 

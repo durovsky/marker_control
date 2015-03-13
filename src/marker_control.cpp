@@ -45,55 +45,19 @@ main(int argc, char *argv[])
 
   ros::Subscriber marker_sub = nh.subscribe("marker3D_pose",1, &Robot::markerCallback, &sda10f);
 
-  ros::AsyncSpinner spinner(1);
-  spinner.start();
-  
-  moveit::planning_interface::MoveGroup group_arm_left("arm_left");
-  moveit::planning_interface::MoveGroup group_arm_right("arm_right");
-  moveit::planning_interface::MoveGroup torso("torso");
-
-  //==================================================
-  //Read and set parameters from launch file
-  //==================================================
-  double planningTime = 10;               //default values
-  double orientationTolerance = 0.02;     //default values
-  double positionTolerance = 0.02;        //default values
-
-  //Read parameters from launch file
-  nh.getParam("planning_time", planningTime);
-  nh.getParam("orientation_tolerance", orientationTolerance);
-  nh.getParam("position_tolerance", positionTolerance);
-
-  ROS_INFO_STREAM("Planning time: " << planningTime);
-  ROS_INFO_STREAM("Orientation tolerance: " << orientationTolerance);
-  ROS_INFO_STREAM("Position tolerance: " << positionTolerance);
-  
-  //Set moveit_planning_interface parameters
-  group_arm_left.setPlanningTime(planningTime);
-  group_arm_left.setGoalOrientationTolerance(orientationTolerance);
-  group_arm_left.setGoalPositionTolerance(positionTolerance);
-  
-  group_arm_right.setPlanningTime(planningTime);
-  group_arm_right.setGoalOrientationTolerance(orientationTolerance);
-  group_arm_right.setGoalPositionTolerance(positionTolerance);
-
-  torso.setPlanningTime(planningTime);
-  torso.setGoalOrientationTolerance(orientationTolerance);
-  torso.setGoalPositionTolerance(positionTolerance);
+  //Joint state subscribers
+  ros::Subscriber r1_sub = nh.subscribe("/sda10f/sda10f_r1_controller/joint_states",10, &Robot::r1_Callback, &sda10f);
+  ros::Subscriber r2_sub = nh.subscribe("/sda10f/sda10f_r2_controller/joint_states",10, &Robot::r2_Callback, &sda10f);
+  ros::Subscriber b1_sub = nh.subscribe("/sda10f/sda10f_b1_controller/joint_states",10, &Robot::b1_Callback, &sda10f);
+  ros::Subscriber b2_sub = nh.subscribe("/sda10f/sda10f_b2_controller/joint_states",10, &Robot::b2_Callback, &sda10f);
 
   ros::spin();
 
-/*  //Wait until everything starts up
+  /*  //Wait until everything starts up
   ros::Duration(10).sleep();
   
 
 
-  //==========================================================
-  //Robot Initial Manipulation
-  //==========================================================
-  moveit::planning_interface::MoveGroup::Plan arm_left_plan;
-  moveit::planning_interface::MoveGroup::Plan arm_right_plan;
-  moveit::planning_interface::MoveGroup::Plan torso_plan;
   
   std::cout << "Press Enter to start robot movemement" << std::endl;
   std::cin.get();
