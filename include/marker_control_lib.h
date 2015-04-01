@@ -38,6 +38,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 /**********************************************************************************************/
 //Standard ROS headers
 #include <visualization_msgs/Marker.h>
+#include <std_msgs/String.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_listener.h>
 
@@ -71,7 +72,9 @@ class Robot
 public:
     Robot(ros::NodeHandle *nh);
     ~Robot();
-    void markerCallback(const geometry_msgs::Pose::ConstPtr &msg);
+    void markerCallback(const visualization_msgs::Marker::ConstPtr &msg);
+    void voiceCallback(const std_msgs::String::ConstPtr &msg);
+
     void move_groups_init(ros::NodeHandle nh);
 
     //Synchronized movement - direct driver access
@@ -85,6 +88,10 @@ public:
 
     control_msgs::FollowJointTrajectoryGoal Trajectory_power_up();
     control_msgs::FollowJointTrajectoryGoal Trajectory_start();
+    control_msgs::FollowJointTrajectoryGoal Trajectory_current();
+
+    void move_left_arm(void);
+    void move_right_arm(void);
 
 private:
     //ROS messaging
@@ -92,11 +99,17 @@ private:
     ros::Publisher marker_trajectory_pub;
     ros::Publisher robot_state_pub;
 
+    //Simulation/Real robot flag
+    bool simulation;
+
     //TrajClient for direct motoman driver access
     TrajClient* traj_client_;
 
     //"Wait for message" flags for joint_states Callbacks
     bool r1_recieved, r2_recieved, b1_recieved, b2_recieved;
+
+    //Trajectory visualization on/off
+    bool trajectory_visualization;
 
     //Joint State variables - holding current robot state
     sensor_msgs::JointState r1, r2, b1, b2;
@@ -113,13 +126,25 @@ private:
     //ROS C++ API for FK and IK computations on current model
     moveit::core::RobotModelPtr kinematic_model;
     moveit::core::JointModelGroup* joint_model_group_arm_left;
+    moveit::core::JointModelGroup* joint_model_group_arm_right;
     moveit::core::RobotStatePtr kinematic_state;
     Eigen::Affine3d end_effector_state;
 
-    //Marker control realted poses
+    //Marker control
+    int marker_id;      //current callback marker id
+    int arm_left_id;    //id for arm_left control
+    int arm_right_id;   //id for arm_right control
+
+    visualization_msgs::Marker current_marker;
     geometry_msgs::PoseStamped current_pose;
     geometry_msgs::Pose marker_pose;
     geometry_msgs::Pose goal_pose;
+
+    //Voice control
+    std::string voice_command;
+    bool voice_control_active;
+    bool voice_fix_position;
+    bool voice_fix_orientation;
 
     //Visualization
     visualization_msgs::Marker marker;

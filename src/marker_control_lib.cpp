@@ -41,29 +41,39 @@ Robot::Robot(ros::NodeHandle *nh) :
     r1_recieved(false),
     r2_recieved(false),
     b1_recieved(false),
-    b2_recieved(false)
+    b2_recieved(false),
+    trajectory_visualization(false),
+    voice_control_active(false),
+    voice_fix_position(false),
+    voice_fix_orientation(false),
+    simulation(true)
+
 {
     //MoveIt groups initialization
     group_arm_left  = new moveit::planning_interface::MoveGroup ("arm_left");
     group_arm_right = new moveit::planning_interface::MoveGroup ("arm_right");
     group_torso     = new moveit::planning_interface::MoveGroup ("torso");
-   move_groups_init(*nh);  //Read tolerance parameters from launch file
+    move_groups_init(*nh);  //Read tolerance parameters from launch file
 
    //Direct driver access for synchronized sda10f movements
     traj_client_ = new TrajClient("/joint_trajectory_action", true);
 
- /*   //wait for action server to come up
-    while(!traj_client_->waitForServer(ros::Duration(5.0)))
+    //if real robot connected wait for action server to come up
+    if(simulation == false)
+    {
+        while(!traj_client_->waitForServer(ros::Duration(5.0)))
            ROS_INFO("Waiting for the trajectory_action server");
 
-    ROS_INFO_STREAM("Joint trajectory action client initialized");
-*/
+        ROS_INFO_STREAM("Joint trajectory action client initialized");
+    }
+
     //Low level C++ approach for fast FK/IK computations
     robot_model_loader::RobotModelLoader robot_model_loader("robot_description");
     kinematic_model = robot_model_loader.getModel();
     kinematic_state.reset(new robot_state::RobotState(kinematic_model));
     kinematic_state->setToDefaultValues();
-    joint_model_group_arm_left = kinematic_model->getJointModelGroup("arm_left");
+    joint_model_group_arm_left  = kinematic_model->getJointModelGroup("arm_left");
+    joint_model_group_arm_right = kinematic_model->getJointModelGroup("arm_right");
 
     //ROS messaging
     marker_pub             = nh->advertise<visualization_msgs::Marker>("Aruco_marker_with_IK",1);
@@ -83,18 +93,47 @@ Robot::~Robot()
 {
     delete traj_client_;
     delete listener;
+    delete trajectory_circular_buffer;
 }
 
 void
-Robot::markerCallback(const geometry_msgs::Pose::ConstPtr &msg)
+Robot::voiceCallback(const std_msgs::String::ConstPtr &msg)
 {
-    marker_pose = *msg;
+    voice_command = msg->data;
 
-   //Get current marker tf
-   listener->waitForTransform("base_link", "marker", ros::Time(0), ros::Duration(0.5));
+    if(voice_command == "continue speech")      voice_control_active = true;
+    if(voice_command == "pause speech")         voice_control_active = false;
+
+    if(voice_command == "fix position")         voice_fix_position = true;
+    if(voice_command == "release position")     voice_fix_position = false;
+    if(voice_command == "fix orientation")      voice_fix_orientation = true;
+    if(voice_command == "release orientation")  voice_fix_orientation = false;
+
+    if(voice_command == "fix all")             {voice_fix_position = true;  voice_fix_orientation == true;  }
+    if(voice_command == "release all")         {voice_fix_position = false; voice_fix_orientation == false; }
+
+    if(voice_command == "basic_position")      startTrajectory(Trajectory_start());
+    if(voice_command == "move all")            startTrajectory(Trajectory_current());
+    if(voice_command == "move left arm")       move_left_arm();
+    if(voice_command == "move right arm")      move_right_arm();
+
+}
+
+void
+Robot::markerCallback(const visualization_msgs::Marker::ConstPtr &msg)
+{
+    current_marker = *msg;
+    marker_pose = current_marker.pose;
+    marker_id = current_marker.id;
+
+    std::stringstream marker_id_string;
+    marker_id_string << "marker_" << marker_id;
+
+    //Get current marker tf
+   listener->waitForTransform("base_link", marker_id_string.str(), ros::Time(0), ros::Duration(0.5));
    try
    {
-        listener->lookupTransform("base_link", "marker", ros::Time(0), marker_transform);
+        listener->lookupTransform("base_link", marker_id_string.str(), ros::Time(0), marker_transform);
    }
    catch (tf::TransformException &ex)
    {
@@ -103,19 +142,31 @@ Robot::markerCallback(const geometry_msgs::Pose::ConstPtr &msg)
    }
 
    const tf::Vector3 marker_origin = marker_transform.getOrigin();
-   const tf::Quaternion marker_orientation = marker_transform.getRotation();
+   tf::Quaternion marker_orientation = marker_transform.getRotation();
 
-   goal_pose.position.x = marker_origin.getX();
-   goal_pose.position.y = marker_origin.getY();
-   goal_pose.position.z = marker_origin.getZ();
+   //Voice control of arm goal
+   if(voice_fix_position == false)
+   {
+       goal_pose.position.x = marker_origin.getX();
+       goal_pose.position.y = marker_origin.getY();
+       goal_pose.position.z = marker_origin.getZ();
+   }
 
-   goal_pose.orientation.x = marker_orientation.getX();
-   goal_pose.orientation.y = marker_orientation.getY();
-   goal_pose.orientation.z = marker_orientation.getZ();
-   goal_pose.orientation.w = marker_orientation.getW();
+   if(voice_fix_orientation == false)
+   {
+      goal_pose.orientation.x = marker_orientation.getX();
+      goal_pose.orientation.y = marker_orientation.getY();
+      goal_pose.orientation.z = marker_orientation.getZ();
+      goal_pose.orientation.w = marker_orientation.getW();
+   }
 
+   bool ik_found;
    //Look for IK solution for current marker pose
-   bool ik_found = kinematic_state->setFromIK(joint_model_group_arm_left, goal_pose, 3, 0.005);
+   if(marker_id == arm_left_id)
+     ik_found = kinematic_state->setFromIK(joint_model_group_arm_left, goal_pose, 3, 0.005);
+
+   if (marker_id == arm_right_id)
+     ik_found = kinematic_state->setFromIK(joint_model_group_arm_right, goal_pose, 3, 0.005);
 
    //---------------------------------------------------
    //Visualize marker pose in RViz
@@ -127,53 +178,18 @@ Robot::markerCallback(const geometry_msgs::Pose::ConstPtr &msg)
    marker.action = visualization_msgs::Marker::ADD;
 
    marker.pose = marker_pose;
-   marker.scale.x = 0.15;  marker.scale.y = 0.15;  marker.scale.z = 0.01;
+   marker.scale.x = 0.2;  marker.scale.y = 0.2;  marker.scale.z = 0.01;
    marker.lifetime = ros::Duration(0.2);
 
    //Marker color - Green for if IK exists, Red if no IK solution
    if (ik_found == true)
-   {  marker.color.g = 1.0f;  marker.color.a = 1.0;  }
+   {  marker.color.b = 1.0f;  marker.color.a = 1.0;  }
    else
    {  marker.color.r = 1.0f;  marker.color.a = 1.0;  }
 
    //Publish marker
    marker_pub.publish(marker);
 
-   //--------------------------------------------------
-   //Visualize marker trajectory in RViz
-   marker_trajectory_point.header.frame_id = "camera_optical_frame";
-   marker_trajectory_point.header.stamp = ros::Time::now();
-   marker_trajectory_point.ns = "trajectory";
-   marker_trajectory_point.id = 2;
-   marker_trajectory_point.type = visualization_msgs::Marker::POINTS;
-   marker_trajectory_point.action = visualization_msgs::Marker::ADD;
-
-   marker_trajectory_point.scale.x = 0.005;  marker_trajectory_point.scale.y = 0.005;
-
-   marker_trajectory_point.pose.orientation.w = 1;
-   geometry_msgs::Point p;
-   p.x = marker_pose.position.x;
-   p.y = marker_pose.position.y;
-   p.z = marker_pose.position.z;
-
-   //Push current point to circular buffer
-   trajectory_circular_buffer->push_back(p);
-   marker_trajectory_point.points.clear();
-
-   //Copy circular buffer to marker_trajectory_points
-   for(size_t i = 0; i < trajectory_circular_buffer->size(); i++)
-       marker_trajectory_point.points.push_back(trajectory_circular_buffer->at(i));
-
-   marker_trajectory_point.lifetime = ros::Duration(5.0);
-
-   //Marker color - Green for if IK exists, Red if no IK solution
-   marker_trajectory_point.color.g = 1.0f; marker_trajectory_point.color.a = 1.0;
-
-
-   //Publish marker trajectory
-   marker_trajectory_pub.publish(marker_trajectory_point);
-
-   //---------------------------------------------------
    //Compute and publish Robot Goal State
    if(ik_found)
    {
@@ -182,6 +198,43 @@ Robot::markerCallback(const geometry_msgs::Pose::ConstPtr &msg)
       robot_state_pub.publish(robot_state_msg);
    }
 
+   //--------------------------------------------------
+   //Trajectory computation
+   //--------------------------------------------------
+   if(trajectory_visualization == true)
+   {
+       //Visualize marker trajectory in RViz
+       marker_trajectory_point.header.frame_id = "camera_optical_frame";
+       marker_trajectory_point.header.stamp = ros::Time::now();
+       marker_trajectory_point.ns = "trajectory";
+       marker_trajectory_point.id = 2;
+       marker_trajectory_point.type = visualization_msgs::Marker::POINTS;
+       marker_trajectory_point.action = visualization_msgs::Marker::ADD;
+
+       marker_trajectory_point.scale.x = 0.005;  marker_trajectory_point.scale.y = 0.005;
+
+       marker_trajectory_point.pose.orientation.w = 1;
+       geometry_msgs::Point p;
+       p.x = marker_pose.position.x;
+       p.y = marker_pose.position.y;
+       p.z = marker_pose.position.z;
+
+       //Push current point to circular buffer
+       trajectory_circular_buffer->push_back(p);
+       marker_trajectory_point.points.clear();
+
+       //Copy circular buffer to marker_trajectory_points
+       for(size_t i = 0; i < trajectory_circular_buffer->size(); i++)
+           marker_trajectory_point.points.push_back(trajectory_circular_buffer->at(i));
+
+       marker_trajectory_point.lifetime = ros::Duration(5.0);
+
+       //Marker color - Green for if IK exists, Red if no IK solution
+       marker_trajectory_point.color.g = 1.0f; marker_trajectory_point.color.a = 1.0;
+
+       //Publish marker trajectory
+       marker_trajectory_pub.publish(marker_trajectory_point);
+    }
 }
 
 void
@@ -190,15 +243,22 @@ Robot::move_groups_init(ros::NodeHandle nh)
  //==================================================
  //Read and set parameters from launch file
  //==================================================
- double planningTime = 10;               //default values
- double orientationTolerance = 0.02;     //default values
- double positionTolerance = 0.02;        //default values
+ double planningTime;                    //default values
+ double orientationTolerance;            //default values
+ double positionTolerance;               //default values
 
  //Read parameters from launch file
- nh.getParam("planning_time", planningTime);
- nh.getParam("orientation_tolerance", orientationTolerance);
- nh.getParam("position_tolerance", positionTolerance);
+ nh.getParam("simulation", simulation);
+ nh.getParam("marker_control/planning_time", planningTime);
+ nh.getParam("marker_control/orientation_tolerance", orientationTolerance);
+ nh.getParam("marker_control/position_tolerance", positionTolerance);
 
+ nh.getParam("marker_control/arm_right_id", arm_right_id);
+ nh.getParam("marker_control/arm_left_id",  arm_left_id);
+
+ ROS_INFO_STREAM("Simulation: " << simulation);
+ ROS_INFO_STREAM("Arm left marker id: " << arm_left_id);
+ ROS_INFO_STREAM("Arm right marker id: " << arm_right_id);
  ROS_INFO_STREAM("Planning time: " << planningTime);
  ROS_INFO_STREAM("Orientation tolerance: " << orientationTolerance);
  ROS_INFO_STREAM("Position tolerance: " << positionTolerance);
@@ -284,7 +344,7 @@ Robot::Trajectory_power_up()
     goal.trajectory.joint_names.push_back("torso_joint_b2");
 
     //Trajectory points
-    goal.trajectory.points.resize(6);
+    goal.trajectory.points.resize(2);
 
     //===========================================================
     //First trajectory point
@@ -404,7 +464,7 @@ Robot::Trajectory_start()
     goal.trajectory.joint_names.push_back("torso_joint_b2");
 
     //Trajectory points
-    goal.trajectory.points.resize(6);
+    goal.trajectory.points.resize(2);
 
     //===========================================================
     //First trajectory point
@@ -488,6 +548,160 @@ Robot::Trajectory_start()
 
 }
 
+//Trajecotry current - move to position defined by marker pose
+control_msgs::FollowJointTrajectoryGoal
+Robot::Trajectory_current()
+{
+    ROS_INFO_STREAM("Moving arm callback");
+
+    //goal variable
+    control_msgs::FollowJointTrajectoryGoal goal;
+
+    //Define robot joint names
+    goal.trajectory.joint_names.push_back("arm_left_joint_1_s");
+    goal.trajectory.joint_names.push_back("arm_left_joint_2_l");
+    goal.trajectory.joint_names.push_back("arm_left_joint_3_e");
+    goal.trajectory.joint_names.push_back("arm_left_joint_4_u");
+    goal.trajectory.joint_names.push_back("arm_left_joint_5_r");
+    goal.trajectory.joint_names.push_back("arm_left_joint_6_b");
+    goal.trajectory.joint_names.push_back("arm_left_joint_7_t");
+
+    goal.trajectory.joint_names.push_back("arm_right_joint_1_s");
+    goal.trajectory.joint_names.push_back("arm_right_joint_2_l");
+    goal.trajectory.joint_names.push_back("arm_right_joint_3_e");
+    goal.trajectory.joint_names.push_back("arm_right_joint_4_u");
+    goal.trajectory.joint_names.push_back("arm_right_joint_5_r");
+    goal.trajectory.joint_names.push_back("arm_right_joint_6_b");
+    goal.trajectory.joint_names.push_back("arm_right_joint_7_t");
+
+    goal.trajectory.joint_names.push_back("torso_joint_b1");
+    goal.trajectory.joint_names.push_back("torso_joint_b2");
+
+    //Trajectory points
+    goal.trajectory.points.resize(2);
+
+    //===========================================================
+    //First trajectory point
+    //===========================================================
+
+    // Positions
+    int ind = 0;
+    goal.trajectory.points[ind].positions.resize(16);
+    goal.trajectory.points[ind].positions[0]  = 0;
+    goal.trajectory.points[ind].positions[1]  = 0;
+    goal.trajectory.points[ind].positions[2]  = 0;
+    goal.trajectory.points[ind].positions[3]  = 0;
+    goal.trajectory.points[ind].positions[4]  = 0;
+    goal.trajectory.points[ind].positions[5]  = 0;
+    goal.trajectory.points[ind].positions[6]  = 0;
+    goal.trajectory.points[ind].positions[7]  = 0;
+    goal.trajectory.points[ind].positions[8]  = 0;
+    goal.trajectory.points[ind].positions[9]  = 0;
+    goal.trajectory.points[ind].positions[10] = 0;
+    goal.trajectory.points[ind].positions[11] = 0;
+    goal.trajectory.points[ind].positions[12] = 0;
+    goal.trajectory.points[ind].positions[13] = 0;
+    goal.trajectory.points[ind].positions[14] = 0;
+    goal.trajectory.points[ind].positions[15] = 0;
+
+    // Velocities
+    goal.trajectory.points[ind].velocities.resize(16);
+    for (size_t j = 0; j < 16; ++j) goal.trajectory.points[ind].velocities[j] = 0.0;
+
+    //Accelerations
+    goal.trajectory.points[ind].accelerations.resize(16);
+    for (size_t j = 0; j < 16; ++j) goal.trajectory.points[ind].accelerations[j] = 0.0;
+
+    //Effort
+    goal.trajectory.points[ind].effort.resize(16);
+    for (size_t j = 0; j < 16; ++j) goal.trajectory.points[ind].effort[j] = 0.0;
+
+    goal.trajectory.points[ind].time_from_start = ros::Duration(0);
+
+    //=====================================================
+    // Second trajectory point
+    //=====================================================
+    // Positions
+    ind = 1;
+
+    //Get joint values from current kinematic state
+    std::vector<double> arm_left_joint_values;
+    std::vector<double> arm_right_joint_values;
+    kinematic_state->copyJointGroupPositions(joint_model_group_arm_left, arm_left_joint_values);
+    kinematic_state->copyJointGroupPositions(joint_model_group_arm_right, arm_right_joint_values);
+
+    goal.trajectory.points[ind].positions.resize(16);
+    goal.trajectory.points[ind].positions[0] = arm_left_joint_values[0];
+    goal.trajectory.points[ind].positions[1] = arm_left_joint_values[1];
+    goal.trajectory.points[ind].positions[2] = arm_left_joint_values[2];
+    goal.trajectory.points[ind].positions[3] = arm_left_joint_values[3];
+    goal.trajectory.points[ind].positions[4] = arm_left_joint_values[4];
+    goal.trajectory.points[ind].positions[5] = arm_left_joint_values[5];
+    goal.trajectory.points[ind].positions[6] = arm_left_joint_values[6];
+    goal.trajectory.points[ind].positions[7] = arm_right_joint_values[0];
+    goal.trajectory.points[ind].positions[8] = arm_right_joint_values[1];
+    goal.trajectory.points[ind].positions[9] = arm_right_joint_values[2];
+    goal.trajectory.points[ind].positions[10] = arm_right_joint_values[3];
+    goal.trajectory.points[ind].positions[11] = arm_right_joint_values[4];
+    goal.trajectory.points[ind].positions[12] = arm_right_joint_values[5];
+    goal.trajectory.points[ind].positions[13] = arm_right_joint_values[6];
+    goal.trajectory.points[ind].positions[14] = 0;
+    goal.trajectory.points[ind].positions[15] = 0;
+
+    // Velocities
+    goal.trajectory.points[ind].velocities.resize(16);
+    for (size_t j = 0; j < 16; ++j) goal.trajectory.points[ind].velocities[j] = 0.0;
+
+    //Accelerations
+    goal.trajectory.points[ind].accelerations.resize(16);
+    for (size_t j = 0; j < 16; ++j) goal.trajectory.points[ind].accelerations[j] = 0.0;
+
+    //Effort
+    goal.trajectory.points[ind].effort.resize(16);
+    for (size_t j = 0; j < 16; ++j) goal.trajectory.points[ind].effort[j] = 0.0;
+
+    //To be reached 10 seconds after starting along the trajectory
+    goal.trajectory.points[ind].time_from_start = ros::Duration(3.0);
+
+    //return the goal
+    return goal;
+}
+
+//Sends the command to start a given trajectory
+void
+Robot::startTrajectory(control_msgs::FollowJointTrajectoryGoal goal)
+{
+   goal.trajectory.header.stamp = ros::Time::now() + ros::Duration(2.0);
+   traj_client_->sendGoal(goal);
+}
+
+void
+Robot::move_left_arm(void)
+{
+    ROS_INFO_STREAM("Move arm callback");
+    std::vector<double> arm_left_joint_values;
+    kinematic_state->copyJointGroupPositions(joint_model_group_arm_left, arm_left_joint_values);
+
+    group_arm_left->setJointValueTarget(arm_left_joint_values);
+    group_arm_left->plan(arm_left_plan);
+    //group_arm_left->execute(arm_left_plan);
+    ros::Duration(3).sleep();
+}
+
+void
+Robot::move_right_arm(void)
+{
+    ROS_INFO_STREAM("Move arm callback");
+    std::vector<double> arm_right_joint_values;
+    kinematic_state->copyJointGroupPositions(joint_model_group_arm_right, arm_right_joint_values);
+
+    group_arm_right->setJointValueTarget(arm_right_joint_values);
+    ROS_INFO_STREAM("Planning started");
+    group_arm_right->plan(arm_right_plan);
+    ROS_INFO_STREAM("Planning finished");
+    //group_arm_right->execute(arm_right_plan);
+    ros::Duration(3).sleep();
+}
 
 
 #endif //MARKER_CONTROL_LIB_CPP
